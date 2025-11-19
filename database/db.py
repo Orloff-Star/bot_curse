@@ -1,6 +1,8 @@
 import aiosqlite
-import datetime
-from typing import List, Tuple
+import logging
+from typing import List
+
+logger = logging.getLogger(__name__)
 
 # Схема сообщений для новых подписчиков
 WELCOME_MESSAGES = [
@@ -11,22 +13,22 @@ WELCOME_MESSAGES = [
     },
     {
         "delay_minutes": 1,  # Через 1 минуту (для теста)
-        "text": "📚 Первое рекомендация!\n\nКурс 'Python для начинающих' - идеальный старт в программировании.\nОсвойте основы за 2 недели!",
-        "image": "https://example.com/python-course.jpg",
+        "text": "📚 Первая рекомендация!\n\nКурс 'Python для начинающих' - идеальный старт в программировании.\nОсвойте основы за 2 недели!",
+        "image": None,
         "button_text": "Посмотреть курс",
         "button_url": "https://example.com/python-course"
     },
     {
-        "delay_minutes": 10,  # Через 10 минут
-        "text": "🤖 Второе рекомендация!\n\nКурс 'Машинное обучение на Python' - станьте специалистом в ИИ!\nПрактические проекты и поддержка ментора.",
-        "image": "https://example.com/ml-course.jpg",
+        "delay_minutes": 60 * 24,  # Через 1 день
+        "text": "🤖 Вторая рекомендация!\n\nКурс 'Машинное обучение на Python' - станьте специалистом в ИИ!\nПрактические проекты и поддержка ментора.",
+        "image": None,
         "button_text": "Узнать подробнее",
         "button_url": "https://example.com/ml-course"
     },
     {
-        "delay_minutes": 60,  # Через 1 час
+        "delay_minutes": 60 * 24 * 3,  # Через 3 дня
         "text": "🚀 Специальное предложение!\n\nПолучите скидку 20% на все наши курсы по промокоду WELCOME20!\nНе упустите шанс начать карьеру в IT!",
-        "image": "https://example.com/special-offer.jpg",
+        "image": None,
         "button_text": "Получить скидку",
         "button_url": "https://example.com/special-offer"
     }
@@ -34,9 +36,12 @@ WELCOME_MESSAGES = [
 
 
 async def create_table():
-    """Создание таблиц базы данных"""
+    """Создание таблиц базы данных с поддержкой миграций"""
     async with aiosqlite.connect('subscribers.db') as db:
-        # Таблица подписчиков
+        # Включаем поддержку внешних ключей
+        await db.execute("PRAGMA foreign_keys = ON")
+
+        # Создаем таблицу подписчиков
         await db.execute('''
             CREATE TABLE IF NOT EXISTS subscribers (
                 user_id INTEGER PRIMARY KEY,
@@ -47,7 +52,7 @@ async def create_table():
             )
         ''')
 
-        # Таблица для отслеживания отправленных сообщений
+        # Создаем таблицу для отслеживания отправленных сообщений
         await db.execute('''
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,11 +60,21 @@ async def create_table():
                 message_stage INTEGER,
                 scheduled_for TIMESTAMP,
                 sent BOOLEAN DEFAULT FALSE,
-                FOREIGN KEY (user_id) REFERENCES subscribers (user_id)
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES subscribers (user_id) ON DELETE CASCADE
             )
         ''')
 
+        # ✅ МИГРАЦИЯ: Добавляем столбец welcome_stage если его нет
+        try:
+            await db.execute("ALTER TABLE subscribers ADD COLUMN welcome_stage INTEGER DEFAULT 0")
+            logger.info("Миграция: добавлен столбец welcome_stage")
+        except aiosqlite.OperationalError:
+            # Столбец уже существует - это нормально
+            pass
+
         await db.commit()
+        logger.info("База данных инициализирована")
 
 
 async def add_subscriber(user_id: int, username: str, first_name: str):
@@ -72,6 +87,7 @@ async def add_subscriber(user_id: int, username: str, first_name: str):
             (user_id, username, first_name)
         )
         await db.commit()
+    logger.info(f"Добавлен подписчик: {user_id}")
 
 
 async def get_all_subscribers():
@@ -102,11 +118,13 @@ async def update_welcome_stage(user_id: int, new_stage: int):
             (new_stage, user_id)
         )
         await db.commit()
+    logger.debug(f"Обновлена стадия welcome_stage для {user_id}: {new_stage}")
 
 
 async def add_scheduled_message(user_id: int, message_stage: int, delay_minutes: int):
     """Добавление запланированного сообщения"""
     async with aiosqlite.connect('subscribers.db') as db:
+        # Используем SQLite datetime функцию для вычисления времени
         scheduled_for = f"datetime('now', '+{delay_minutes} minutes')"
         await db.execute(
             f"""INSERT INTO scheduled_messages 
@@ -115,6 +133,7 @@ async def add_scheduled_message(user_id: int, message_stage: int, delay_minutes:
             (user_id, message_stage)
         )
         await db.commit()
+    logger.debug(f"Добавлено запланированное сообщение для {user_id}, стадия {message_stage}")
 
 
 async def get_pending_messages():
@@ -125,6 +144,7 @@ async def get_pending_messages():
             FROM scheduled_messages sm
             JOIN subscribers s ON sm.user_id = s.user_id
             WHERE sm.sent = FALSE AND sm.scheduled_for <= datetime('now')
+            ORDER BY sm.scheduled_for ASC
         ''')
         rows = await cursor.fetchall()
         return rows
@@ -138,3 +158,14 @@ async def mark_message_sent(message_id: int):
             (message_id,)
         )
         await db.commit()
+    logger.debug(f"Отмечено сообщение {message_id} как отправленное")
+
+
+async def cleanup_old_messages():
+    """Очистка старых отправленных сообщений (чтобы база не росла бесконечно)"""
+    async with aiosqlite.connect('subscribers.db') as db:
+        await db.execute(
+            "DELETE FROM scheduled_messages WHERE sent = TRUE AND created_at < datetime('now', '-7 days')"
+        )
+        await db.commit()
+    logger.info("Очищены старые отправленные сообщения")
