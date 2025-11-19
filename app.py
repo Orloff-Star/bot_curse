@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -8,7 +9,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_PATH
+from config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_PATH, RENDER_EXTERNAL_URL
 from database.db import create_table
 from handlers.user_handlers import user_router
 from scheduler.tasks import send_scheduled_welcome
@@ -20,6 +21,16 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+async def self_ping():
+    """Функция для само-пинга сервиса"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{RENDER_EXTERNAL_URL}/health") as resp:
+                logger.info(f"Self-ping выполнен, статус: {resp.status}")
+    except Exception as e:
+        logger.error(f"Ошибка при само-пинге: {e}")
 
 
 async def on_startup(bot: Bot):
@@ -34,7 +45,8 @@ async def on_startup(bot: Bot):
 
         # Запускаем планировщик
         scheduler = AsyncIOScheduler()
-        # Проверяем каждую минуту наличие сообщений для отправки
+
+        # Задача для приветственных сообщений (каждую минуту)
         scheduler.add_job(
             send_scheduled_welcome,
             'interval',
@@ -42,6 +54,15 @@ async def on_startup(bot: Bot):
             args=[bot],
             id='welcome_messages'
         )
+
+        # ✅ Задача для само-пинга (каждые 10 минут)
+        scheduler.add_job(
+            self_ping,
+            'interval',
+            minutes=10,
+            id='self_ping'
+        )
+
         scheduler.start()
         logger.info("Планировщик запущен")
 
@@ -65,6 +86,13 @@ async def health_check(request):
     return web.Response(text="Bot is alive and running!")
 
 
+async def stats_check(request):
+    """Эндпоинт для получения статистики"""
+    from database.db import get_all_subscribers
+    subscribers = await get_all_subscribers()
+    return web.Response(text=f"Bot stats: {len(subscribers)} subscribers")
+
+
 def main():
     """Основная функция инициализации"""
     # Инициализируем бот
@@ -85,6 +113,7 @@ def main():
     # Добавляем health check эндпоинты
     app.router.add_get("/", health_check)
     app.router.add_get("/health", health_check)
+    app.router.add_get("/stats", stats_check)  # Новый эндпоинт
 
     # Создаем обработчик вебхуков
     webhook_requests_handler = SimpleRequestHandler(
