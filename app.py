@@ -55,11 +55,11 @@ async def on_startup(bot: Bot):
             id='welcome_messages'
         )
 
-        # ✅ Задача для само-пинга (каждые 10 минут)
+        # ✅ Задача для само-пинга (каждые 1 минут)
         scheduler.add_job(
             self_ping,
             'interval',
-            minutes=10,
+            minutes=2,
             id='self_ping'
         )
 
